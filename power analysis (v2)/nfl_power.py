@@ -224,7 +224,6 @@ class PowerModel:
         kpi_index = 0
         for function in compute_functions:
             stat = function(pbp_trim, schedule_trim)
-            # stat["kpi"] *= week / 20
             df = df.reset_index().merge(stat, how="left", on="abbr").set_index("index")
             df = df.rename({"kpi": f"kpi_{kpi_index}"}, axis="columns")
             kpi_index += 1
@@ -311,8 +310,9 @@ class PowerModel:
         return power_table
 
 
-def create_power_model(seasons: list[int]):
-    pass
+# TODO
+#   - read/write IO for the model
+#   - look into the probabalistic adjustment
 
 
 model = PowerModel()
