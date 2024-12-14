@@ -129,10 +129,10 @@ class PowerModel:
 
     @staticmethod
     def _next_week_diff(
-        row: pd.Series, schedule: pd.DataFrame, home_advan: float
+        row: pd.Series, schedule: pd.DataFrame, home_advan: float, df: pd.DataFrame
     ) -> float | None:
         """
-        Helper function that computes the teams next week score differential
+        Helper function that computes the teams next week score differential and returns its opponents KPIs
         """
         # get all possible future games for the team
         this_team = (schedule["home_team"] == row["abbr"]) | (
@@ -146,17 +146,40 @@ class PowerModel:
             first_week = possible_games["week"].min()
             next_week = possible_games[possible_games["week"] == first_week].iloc[0]
 
-            # return the differential (correcting for home field advantage)
+            # compute the differential (correcting for home field advantage) and get the oppositions KPIs
             if next_week["home_team"] == row["abbr"]:
-                return (
+                # compute the score differential
+                score_diff = (
                     next_week["home_score"] - next_week["away_score"] - (home_advan / 2)
                 )
+
+                # get the oppositions KPIs
+                df_oppo: pd.DataFrame = df[df["abbr"] == next_week["away_team"]]
+                kpis = df_oppo.filter(like="kpi", axis=1).values[0]
+
+                return pd.Series(
+                    list(kpis) + [score_diff],
+                    index=list(row.filter(like="kpi").index) + ["y"],
+                )
             else:
-                return (
+                score_diff = (
                     next_week["away_score"] - next_week["home_score"] + (home_advan / 2)
                 )
+
+                # get the oppositions KPIs
+                df_oppo: pd.DataFrame = df[df["abbr"] == next_week["home_team"]]
+                kpis = df_oppo.filter(like="kpi", axis=1).values[0]
+
+                return pd.Series(
+                    list(kpis) + [score_diff],
+                    index=list(row.filter(like="kpi").index) + ["y"],
+                )
+
         else:
-            return None
+            return pd.Series(
+                [None for _ in range(len(row.filter(like="kpi").index) + 1)],
+                index=list(row.filter(like="kpi").index) + ["y"],
+            )
 
     @staticmethod
     def _create_dataset_singleweek(
@@ -201,6 +224,7 @@ class PowerModel:
         kpi_index = 0
         for function in compute_functions:
             stat = function(pbp_trim, schedule_trim)
+            # stat["kpi"] *= week / 20
             df = df.reset_index().merge(stat, how="left", on="abbr").set_index("index")
             df = df.rename({"kpi": f"kpi_{kpi_index}"}, axis="columns")
             kpi_index += 1
@@ -211,8 +235,12 @@ class PowerModel:
         )
 
         # compute each team's score differential for the following week (NA is does not exist)
-        df["y"] = df.apply(
-            PowerModel._next_week_diff, axis=1, schedule=schedule, home_advan=home_advan
+        df[[f"opp_kpi_{i}" for i in range(len(compute_functions))] + ["y"]] = df.apply(
+            PowerModel._next_week_diff,
+            axis=1,
+            schedule=schedule,
+            home_advan=home_advan,
+            df=df,
         )
 
         return df
@@ -253,7 +281,9 @@ class PowerModel:
         df = df.dropna()
 
         # get X and y as ndarray
-        X = df.filter(like="kpi", axis=1).values
+        X_1 = df.filter(regex="^kpi", axis=1).values
+        X_2 = df.filter(like="opp", axis=1).values
+        X = X_1 - X_2
         y = df["y"].values
 
         # run the model
@@ -270,7 +300,8 @@ class PowerModel:
         df = PowerModel._create_dataset_singleweek(
             season, week, schedule, pbp, self.compute_functions
         )
-        X = df.filter(like="kpi", axis=1).values
+        X = df.filter(regex="^kpi", axis=1).values
+        X = X - np.mean(X, axis=0)
 
         # use the model to predict the power score
         y = self.model.predict(X)
