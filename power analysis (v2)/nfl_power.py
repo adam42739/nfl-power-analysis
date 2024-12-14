@@ -2,13 +2,13 @@ import nfl_data_py
 import os
 import pandas as pd
 import numpy as np
-from scipy import optimize
 from typing import Callable
+from sklearn.linear_model import LinearRegression
 
 
-# ================== #
-# 1. CACHE FUNCTIONS #
-# ================== #
+# =============== #
+# CACHE FUNCTIONS #
+# =============== #
 
 
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "../cache")
@@ -55,82 +55,66 @@ def load_schedule(season: int) -> pd.DataFrame:
         return nfl_data_py.import_schedules([season])
 
 
-# ===================================== #
-# 2. PERFORMANCE INDICATOR CALCULATIONS #
-# ===================================== #
-
-# =============================== #
-# 2.1. Expected Score Differntial #
-# =============================== #
+# ================= #
+# UTILITY FUNCTIONS #
+# ================= #
 
 
-def _init_exp_diff_frame(X: tuple[float], scores: pd.DataFrame):
-    """
-    Initialize the expected differential dataframe
-    """
-    exp_diff = pd.DataFrame(
-        {"team": sorted(list(scores["home_team"].unique())), "exp_diff": [x for x in X]}
-    )
-    return exp_diff
+def differential_linreg(df: pd.DataFrame) -> pd.DataFrame:
+    # compute the home field advantage
+    home_advan = df["home_X"].mean() - df["away_X"].mean()
+
+    # create the y (outcome) variable
+    y = df["home_X"] - df["away_X"] + home_advan
+
+    # team abbreviations alphabetically
+    abbrs = sorted(pd.concat([df["home_team"], df["away_team"]]).unique())
+
+    # create the X (feature) matrix
+    df = df.reset_index(drop=True)
+    X = np.zeros((len(y), 32))
+    for i in range(len(y)):
+        # set the home team's value to 1
+        home_index = abbrs.index(df.loc[i, "home_team"])
+        X[i, home_index] = 1
+
+        # away team to -1
+        away_index = abbrs.index(df.loc[i, "away_team"])
+        X[i, away_index] = -1
+
+    # run linear regression
+    model = LinearRegression(fit_intercept=False)
+    model.fit(X, y)
+
+    # return the KPI table
+    kpi = pd.DataFrame({"abbr": abbrs, "kpi": model.coef_})
+    return kpi
 
 
-def _exp_diff_error(
-    exp_diff: pd.DataFrame, scores: pd.DataFrame, home_advan: float
-) -> float:
-    """
-    Compute the mean error for the given, expected differential values, scores, and home field advantage
-    """
-    # create a table with the scores of each game and each teams expected differential
-    table = pd.merge(left=scores, right=exp_diff, left_on="home_team", right_on="team")
-    table = pd.merge(left=table, right=exp_diff, left_on="away_team", right_on="team")
-    table = table.rename(
-        {"exp_diff_x": "home_exp_diff", "exp_diff_y": "away_exp_diff"}, axis="columns"
-    )
-    table = table[["home_score", "away_score", "home_exp_diff", "away_exp_diff"]]
+# ================================== #
+# PERFORMANCE INDICATOR CALCULATIONS #
+# ================================== #
 
-    # compute the expected score differential for each game
-    game_exp_diff = table["home_exp_diff"] - table["away_exp_diff"] + home_advan
-
-    # compute the real score differential for each game
-    game_real_diff = table["home_score"] - table["away_score"]
-
-    # compute and return the error in expected vs. real scores
-    return np.sqrt(np.mean(np.square(game_exp_diff - game_real_diff)))
-
-
-def _exp_diff_objective(
-    X: tuple[float], scores: pd.DataFrame, home_advan: float
-) -> float:
-    """
-    Define the objective function for minimization
-    """
-    exp_diff = _init_exp_diff_frame(X, scores)
-    return _exp_diff_error(exp_diff, scores, home_advan)
+# ========================== #
+# Expected Score Differntial #
+# ========================== #
 
 
 def compute_exp_diff(pbp: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
     """
     Compute the expected differential table for the given season schedule
     """
-    # compute the average home field advantage
-    home_advan = np.mean(scores["home_score"]) - np.mean(scores["away_score"])
+    # get only the important columns and rename accordingly
+    df = scores[["home_team", "away_team", "home_score", "away_score"]]
+    df = df.rename({"home_score": "home_X", "away_score": "away_X"}, axis="columns")
 
-    # minimize the error
-    solution = optimize.minimize(
-        _exp_diff_objective,
-        tuple(0 for _ in range(32)),
-        args=(scores, home_advan),
-        tol=1e-6,
-    )
-
-    # return the expected differential table
-    exp_diff_table = _init_exp_diff_frame(solution.x, scores)
-    return exp_diff_table
+    # return the differential linear regression KPI table
+    return differential_linreg(df)
 
 
-# ================ #
-# 3. MODEL FITTING #
-# ================ #
+# ============= #
+# MODEL FITTING #
+# ============= #
 
 
 class PowerModel:
@@ -143,33 +127,157 @@ class PowerModel:
     def dump(self, fname: str):
         pass
 
+    @staticmethod
+    def _next_week_diff(
+        row: pd.Series, schedule: pd.DataFrame, home_advan: float
+    ) -> float | None:
+        """
+        Helper function that computes the teams next week score differential
+        """
+        # get all possible future games for the team
+        this_team = (schedule["home_team"] == row["abbr"]) | (
+            schedule["away_team"] == row["abbr"]
+        )
+        after_week = schedule["week"] > row["week"]
+        possible_games: pd.DataFrame = schedule[this_team & after_week]
+
+        if not possible_games.empty:
+            # get the next weeks game as a pd.Series
+            first_week = possible_games["week"].min()
+            next_week = possible_games[possible_games["week"] == first_week].iloc[0]
+
+            # return the differential (correcting for home field advantage)
+            if next_week["home_team"] == row["abbr"]:
+                return (
+                    next_week["home_score"] - next_week["away_score"] - (home_advan / 2)
+                )
+            else:
+                return (
+                    next_week["away_score"] - next_week["home_score"] + (home_advan / 2)
+                )
+        else:
+            return None
+
+    @staticmethod
+    def _create_dataset_singleweek(
+        season: int,
+        week: int,
+        schedule: pd.DataFrame,
+        pbp: pd.DataFrame,
+        compute_functions: set[Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]],
+    ):
+        """
+        Compute the KPIs for a single week
+        """
+        # trim the input dataframes to only have data up until this week
+        up_to_week = schedule["week"] <= week
+        schedule_trim = schedule[up_to_week]
+        up_to_week = pbp["week"] <= week
+        pbp_trim = pbp[up_to_week]
+
+        # get a list of all team abbreviations sorted
+        abbrs = sorted(
+            pd.concat([schedule["home_team"], schedule["away_team"]]).unique()
+        )
+
+        # initialize the dataframe formatted like:
+        #   |                        index |           abbr |   season |   week |
+        #   |------------------------------|----------------|----------|--------|
+        #   | {season}{abbreviation}{week} | {abbreviation} | {season} | {week} |
+        #   |               .              |        .       |    .     |   .    |
+        #   |               .              |        .       |    .     |   .    |
+        #   |               .              |        .       |    .     |   .    |
+        df = pd.DataFrame(
+            {
+                "abbr": [abbr for abbr in abbrs],
+                "season": [season for _ in abbrs],
+                "week": [week for _ in abbrs],
+            },
+            index=[f"{season}{abbr}{week}" for abbr in abbrs],
+        )
+
+        # iterate over each compute function to populate the
+        # dataframe with predictors horizontally
+        kpi_index = 0
+        for function in compute_functions:
+            stat = function(pbp_trim, schedule_trim)
+            df = df.reset_index().merge(stat, how="left", on="abbr").set_index("index")
+            df = df.rename({"kpi": f"kpi_{kpi_index}"}, axis="columns")
+            kpi_index += 1
+
+        # compute the home field advantage
+        home_advan = (
+            schedule_trim["home_score"].mean() - schedule_trim["away_score"].mean()
+        )
+
+        # compute each team's score differential for the following week (NA is does not exist)
+        df["y"] = df.apply(
+            PowerModel._next_week_diff, axis=1, schedule=schedule, home_advan=home_advan
+        )
+
+        return df
+
     def build(
         self,
         seasons: list[int],
-        compute_functions: set[Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]] = {
-            compute_exp_diff
-        },
+        compute_functions: list[
+            Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]
+        ] = [
+            compute_exp_diff,
+        ],
     ):
+        """
+        Build the power model
+        """
+        self.compute_functions = compute_functions
+
+        # compute all the KPIs for each season and week
         dfs = []
         for season in seasons:
+            # load in the schedule and pbp data for the given season
             schedule = load_schedule(season)
             pbp = load_pbp(season)
-            abbrs = sorted(
-                list(pd.concat([schedule["home_team"], schedule["away_team"]]).unique())
-            )
-            df = pd.DataFrame(
-                {
-                    "team": [f"{season}{abbr}" for abbr in abbrs],
-                    "abbr": [abbr for abbr in abbrs],
-                }
-            )
-            for function in compute_functions:
-                stat = function(pbp, schedule)
-                df = pd.merge(left=df, right=stat, left_on="abbr", right_on="team")
-                df = df.drop(columns="team_y")
-                df = df.rename({"team_x": "team"}, axis="columns")
-            dfs.append(df)
+
+            # compute which week was the last week of the season (or last played week for the current season)
+            max_week = int(schedule["week"].max())
+
+            # iterate over each week
+            for week in range(1, max_week + 1):
+                df = PowerModel._create_dataset_singleweek(
+                    season, week, schedule, pbp, compute_functions
+                )
+                dfs.append(df)
         df = pd.concat(dfs)
+
+        # drop NAs (datapoints where the team played no more future games)
+        df = df.dropna()
+
+        # get X and y as ndarray
+        X = df.filter(like="kpi", axis=1).values
+        y = df["y"].values
+
+        # run the model
+        self.model = LinearRegression(fit_intercept=True)
+        self.model.fit(X, y)
+
+    def compute_power(
+        self, pbp: pd.DataFrame, schedule: pd.DataFrame, season: int, week: int
+    ) -> pd.DataFrame:
+        """
+        Compute the power scores by predicting from the model
+        """
+        # get the KPIs for the given data
+        df = PowerModel._create_dataset_singleweek(
+            season, week, schedule, pbp, self.compute_functions
+        )
+        X = df.filter(like="kpi", axis=1).values
+
+        # use the model to predict the power score
+        y = self.model.predict(X)
+
+        # create and return the power table
+        power_table = pd.DataFrame({"team": df["abbr"], "power": y})
+        return power_table
 
 
 def create_power_model(seasons: list[int]):
@@ -177,4 +285,6 @@ def create_power_model(seasons: list[int]):
 
 
 model = PowerModel()
-model.build([2022, 2023])
+model.build([2023])
+power_table = model.compute_power(load_pbp(2024), load_schedule(2024), 2024, 12)
+print(power_table.sort_values(by="power", ascending=False))
