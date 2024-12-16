@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import Callable
 from sklearn.linear_model import LinearRegression
+import json
 
 
 # =============== #
@@ -100,6 +101,9 @@ def differential_linreg(df: pd.DataFrame) -> pd.DataFrame:
 # ========================== #
 
 
+EXPECTED_SCORE_DIFFERENTIAL = "expected_score_differential"
+
+
 def compute_exp_diff(pbp: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
     """
     Compute the expected differential table for the given season schedule
@@ -117,15 +121,44 @@ def compute_exp_diff(pbp: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
 # ============= #
 
 
+COMPUTE_FUNCTIONS = {EXPECTED_SCORE_DIFFERENTIAL: compute_exp_diff}
+
+
 class PowerModel:
     def __init__(self):
         pass
 
+    # =========== #
+    # I/O Methods #
+    # =========== #
+
+    @staticmethod
+    def _path(fname: str) -> str:
+        return os.path.join(CACHE_PATH, fname + ".json")
+
     def load(self, fname: str):
-        pass
+        metadata = {}
+        with open(PowerModel._path(fname), "r") as file:
+            metadata = json.load(file)
+        self.compute_functions = metadata["compute"]
+        self.model = LinearRegression()
+        self.model.coef_ = np.array(metadata["coef"])
+        self.model.intercept_ = metadata["inter"]
 
     def dump(self, fname: str):
-        pass
+        with open(PowerModel._path(fname), "w") as file:
+            json.dump(
+                {
+                    "coef": list(self.model.coef_),
+                    "inter": self.model.intercept_,
+                    "compute": self.compute_functions,
+                },
+                file,
+            )
+
+    # ============== #
+    # Model Building #
+    # ============== #
 
     @staticmethod
     def _next_week_diff(
@@ -187,7 +220,7 @@ class PowerModel:
         week: int,
         schedule: pd.DataFrame,
         pbp: pd.DataFrame,
-        compute_functions: set[Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]],
+        compute_functions: list[str],
     ):
         """
         Compute the KPIs for a single week
@@ -223,7 +256,7 @@ class PowerModel:
         # dataframe with predictors horizontally
         kpi_index = 0
         for function in compute_functions:
-            stat = function(pbp_trim, schedule_trim)
+            stat = COMPUTE_FUNCTIONS[function](pbp_trim, schedule_trim)
             df = df.reset_index().merge(stat, how="left", on="abbr").set_index("index")
             df = df.rename({"kpi": f"kpi_{kpi_index}"}, axis="columns")
             kpi_index += 1
@@ -247,10 +280,8 @@ class PowerModel:
     def build(
         self,
         seasons: list[int],
-        compute_functions: list[
-            Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]
-        ] = [
-            compute_exp_diff,
+        compute_functions: list[str] = [
+            EXPECTED_SCORE_DIFFERENTIAL,
         ],
     ):
         """
@@ -289,6 +320,10 @@ class PowerModel:
         self.model = LinearRegression(fit_intercept=True)
         self.model.fit(X, y)
 
+    # ========== #
+    # Prediction #
+    # ========== #
+
     def compute_power(
         self, pbp: pd.DataFrame, schedule: pd.DataFrame, season: int, week: int
     ) -> pd.DataFrame:
@@ -311,11 +346,17 @@ class PowerModel:
 
 
 # TODO
-#   - read/write IO for the model
 #   - look into the probabalistic adjustment
 
 
 model = PowerModel()
 model.build([2023])
+power_table = model.compute_power(load_pbp(2024), load_schedule(2024), 2024, 12)
+print(power_table.sort_values(by="power", ascending=False))
+model.dump("test")
+model = None
+power_table = None
+model = PowerModel()
+model.load("test")
 power_table = model.compute_power(load_pbp(2024), load_schedule(2024), 2024, 12)
 print(power_table.sort_values(by="power", ascending=False))
