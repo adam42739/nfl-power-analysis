@@ -2,7 +2,6 @@ import nfl_data_py
 import os
 import pandas as pd
 import numpy as np
-from typing import Callable
 from sklearn.linear_model import LinearRegression
 import json
 
@@ -347,16 +346,3 @@ class PowerModel:
 
 # TODO
 #   - look into the probabalistic adjustment
-
-
-model = PowerModel()
-model.build([2023])
-power_table = model.compute_power(load_pbp(2024), load_schedule(2024), 2024, 12)
-print(power_table.sort_values(by="power", ascending=False))
-model.dump("test")
-model = None
-power_table = None
-model = PowerModel()
-model.load("test")
-power_table = model.compute_power(load_pbp(2024), load_schedule(2024), 2024, 12)
-print(power_table.sort_values(by="power", ascending=False))
